@@ -113,7 +113,10 @@
   footer { margin-top: 2rem; font-family: "Inconsolata", monospace; font-size: 0.72rem; color: var(--ink-soft); }
   footer a{color:var(--accent);}
   .opt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0.8rem; margin-top: 0.8rem; }
+  .opt-list { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.8rem; }
   .opt-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.86rem; }
+  .opt-list .opt-check { align-items: flex-start; }
+  .opt-list .opt-check input { margin-top: 0.2rem; flex-shrink: 0; }
   .opt-check input { width: auto; }
   .opt-sub { font-family: "Inconsolata", monospace; font-size: 0.68rem; color: var(--ink-soft); margin: 1.1rem 0 0.2rem; text-transform: uppercase; letter-spacing: 0.04em; }
 </style>
@@ -264,7 +267,7 @@
     </div>
 
     <div class="opt-sub">Preservation</div>
-    <div class="opt-grid">
+    <div class="opt-list">
       <label class="opt-check"><input type="checkbox" id="preserveMeta" checked> Preserve unmapped source fields in <code>extensions.janitorai_source</code></label>
       <label class="opt-check"><input type="checkbox" id="preserveExisting" checked> Preserve existing settings — for entries that already have a value (placement, recursion, match toggles, order, probability, etc. — including values tucked inside <code>extensions</code>/<code>extensions.janitorai_source</code> from a prior conversion), keep it. The Advanced settings above only fill in values that are missing.</label>
     </div>
