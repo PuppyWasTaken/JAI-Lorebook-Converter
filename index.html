@@ -192,7 +192,7 @@
 
     <div class="opt-sub">Ordering</div>
     <div class="opt-grid">
-      <div class="opt"><label for="orderBase">Order base</label><input type="number" id="orderBase" value="300"></div>
+      <div class="opt"><label for="orderBase">Order base</label><input type="number" id="orderBase" value="100"></div>
       <div class="opt"><label for="orderStep">Order step per priority rank</label><input type="number" id="orderStep" value="5" min="0"></div>
     </div>
     <p class="opt-sub" style="text-transform:none;letter-spacing:0;font-size:0.75rem;">
@@ -266,6 +266,7 @@
     <div class="opt-sub">Preservation</div>
     <div class="opt-grid">
       <label class="opt-check"><input type="checkbox" id="preserveMeta" checked> Preserve unmapped source fields in <code>extensions.janitorai_source</code></label>
+      <label class="opt-check"><input type="checkbox" id="preserveExisting" checked> Preserve existing settings — for entries that already have a value (placement, recursion, match toggles, order, probability, etc. — including values tucked inside <code>extensions</code>/<code>extensions.janitorai_source</code> from a prior conversion), keep it. The Advanced settings above only fill in values that are missing.</label>
     </div>
   </details>
 
@@ -287,6 +288,7 @@
         <tr><td><code>caseSensitive</code> / <code>matchWholeWords</code></td><td>null by default — the reference book had these null even where the source set <code>matchWholeWords: true</code>. Switchable to pass-through above.</td></tr>
         <tr><td>match* fields</td><td>from the checkboxes above; the depth-1 rule can override description/persona to false and force <code>excludeRecursion</code> true for that entry.</td></tr>
         <tr><td><code>extensions</code></td><td>mirrors <code>{position, role, depth, sticky, cooldown, delay}</code> (matches the reference book's legacy-compat duplication), plus unmapped source fields under <code>extensions.janitorai_source</code> when preservation is on.</td></tr>
+        <tr><td>"Preserve existing settings"</td><td>when on, any field the entry already has a value for — at the top level, under <code>extensions</code>, or nested in <code>extensions.janitorai_source</code> from an earlier conversion — is kept as-is, including <code>order</code>. Advanced settings above are only used to fill in what's actually missing. Turn it off to force every entry to the Advanced settings values instead.</td></tr>
       </tbody>
     </table>
   </details>
@@ -371,6 +373,16 @@
     insertion_order: 1, order: 1, priority: 1, position: 1, enabled: 1, disable: 1,
     probability: 1, depth: 1, groupWeight: 1, extensions: 1, tags: 1, group: 1,
     inclusionGroupRaw: 1, minMessages: 1, role: 1,
+    // ST-side fields this tool itself writes out. Listed here so that
+    // re-running a conversion on an already-converted file doesn't treat
+    // them as "unmapped" and stuff them into a fresh extensions.janitorai_source,
+    // which would clobber the real original-source data already nested there.
+    uid: 1, vectorized: 1, addMemo: 1, useProbability: 1, groupOverride: 1,
+    scanDepth: 1, caseSensitive: 1, matchWholeWords: 1, useGroupScoring: 1,
+    automationId: 1, sticky: 1, cooldown: 1, delay: 1, displayIndex: 1,
+    matchScenario: 1, matchCharacterDescription: 1, matchPersonaDescription: 1,
+    matchCharacterPersonality: 1, matchCharacterDepthPrompt: 1, matchCreatorNotes: 1,
+    excludeRecursion: 1, preventRecursion: 1, delayUntilRecursion: 1,
   };
 
   function readSettings() {
@@ -392,7 +404,23 @@
       matchCharacterDepthPrompt: $('matchCharacterDepthPrompt').checked,
       matchCreatorNotes: $('matchCreatorNotes').checked,
       preserveMeta: $('preserveMeta').checked,
+      preserveExisting: $('preserveExisting').checked,
     };
+  }
+
+  // Looks for `name` on the entry itself first, then in extensions, then in
+  // extensions.janitorai_source (where a prior conversion may have tucked
+  // away the original JanitorAI fields). Returns undefined if not found
+  // anywhere, so callers can fall back to an Advanced-settings default.
+  function sourceField(raw, name) {
+    if (raw && Object.prototype.hasOwnProperty.call(raw, name) && raw[name] !== undefined) return raw[name];
+    if (raw && raw.extensions && typeof raw.extensions === 'object') {
+      var ext = raw.extensions;
+      if (Object.prototype.hasOwnProperty.call(ext, name) && ext[name] !== undefined) return ext[name];
+      var js = ext.janitorai_source;
+      if (js && typeof js === 'object' && Object.prototype.hasOwnProperty.call(js, name) && js[name] !== undefined) return js[name];
+    }
+    return undefined;
   }
 
   function convertEntry(raw, idx, s) {
@@ -406,31 +434,87 @@
     var constant = raw.constant === true || activationMode === 'constant';
     var vectorized = activationMode === 'vectorized';
 
-    var priorityRank = typeof raw.priority === 'number' ? raw.priority
-      : (typeof raw.insertion_order === 'number' ? raw.insertion_order : idx + 1);
-    var order = Math.round(s.orderBase - (priorityRank - 1) * s.orderStep);
+    // order: preserved as-is when preserveExisting is on and the entry
+    // already has one (e.g. reprocessing a previous conversion); otherwise
+    // recomputed from priority/insertion_order (checking extensions and
+    // extensions.janitorai_source too, in case that's where it's tucked away).
+    var orderSource = sourceField(raw, 'order');
+    var order;
+    if (s.preserveExisting && typeof orderSource === 'number') {
+      order = orderSource;
+    } else {
+      var priorityRank = typeof sourceField(raw, 'priority') === 'number' ? sourceField(raw, 'priority')
+        : (typeof sourceField(raw, 'insertion_order') === 'number' ? sourceField(raw, 'insertion_order') : idx + 1);
+      order = Math.round(s.orderBase - (priorityRank - 1) * s.orderStep);
+    }
 
-    var position = typeof raw.position === 'number' ? raw.position : s.position;
-    var depth = typeof raw.depth === 'number' ? raw.depth : s.defaultDepth;
-    var role = typeof raw.role === 'number' ? raw.role : s.role;
+    var positionSource = sourceField(raw, 'position');
+    var depthSource = sourceField(raw, 'depth');
+    var roleSource = sourceField(raw, 'role');
+    var position = typeof positionSource === 'number' ? positionSource : s.position;
+    var depth = typeof depthSource === 'number' ? depthSource : s.defaultDepth;
+    var role = typeof roleSource === 'number' ? roleSource : s.role;
 
-    var disable = raw.enabled === false;
+    var enabledSource = sourceField(raw, 'enabled');
+    var disableSource = sourceField(raw, 'disable');
+    var disable = disableSource === true || enabledSource === false;
 
     var tags = Array.isArray(raw.tags) ? raw.tags : [];
-    var preventRecursion = s.preventRecursionMode === 'on' ? true
-      : (s.preventRecursionMode === 'off' ? false : tags.indexOf('world') !== -1);
+    var preventRecursionSource = sourceField(raw, 'preventRecursion');
+    var preventRecursion = (s.preserveExisting && typeof preventRecursionSource === 'boolean')
+      ? preventRecursionSource
+      : (s.preventRecursionMode === 'on' ? true
+        : (s.preventRecursionMode === 'off' ? false : tags.indexOf('world') !== -1));
 
     var isTransient = s.depthOneSpecial && depth === 1;
-    var matchCharacterDescription = isTransient ? false : s.matchCharacterDescription;
-    var matchPersonaDescription = isTransient ? false : s.matchPersonaDescription;
-    var excludeRecursion = isTransient ? true : s.excludeRecursionDefault;
 
-    var group = raw.inclusionGroupRaw || raw.group || '';
-    var delay = (typeof raw.minMessages === 'number' && raw.minMessages > 0) ? raw.minMessages : 0;
-    var probability = typeof raw.probability === 'number' ? Math.max(0, Math.min(100, raw.probability)) : 100;
+    function resolveMatchBool(name, transientOverride, settingsDefault) {
+      var existing = sourceField(raw, name);
+      if (s.preserveExisting && typeof existing === 'boolean') return existing;
+      if (transientOverride !== undefined) return transientOverride;
+      return settingsDefault;
+    }
+    var matchCharacterDescription = resolveMatchBool('matchCharacterDescription', isTransient ? false : undefined, s.matchCharacterDescription);
+    var matchPersonaDescription = resolveMatchBool('matchPersonaDescription', isTransient ? false : undefined, s.matchPersonaDescription);
+    var excludeRecursion = resolveMatchBool('excludeRecursion', isTransient ? true : undefined, s.excludeRecursionDefault);
+    var matchScenario = resolveMatchBool('matchScenario', undefined, s.matchScenario);
+    var matchCharacterPersonality = resolveMatchBool('matchCharacterPersonality', undefined, s.matchCharacterPersonality);
+    var matchCharacterDepthPrompt = resolveMatchBool('matchCharacterDepthPrompt', undefined, s.matchCharacterDepthPrompt);
+    var matchCreatorNotes = resolveMatchBool('matchCreatorNotes', undefined, s.matchCreatorNotes);
+    var delayUntilRecursion = resolveMatchBool('delayUntilRecursion', undefined, s.delayUntilRecursion);
 
-    var caseSensitive = s.caseMode === 'passthrough' ? !!raw.case_sensitive : null;
-    var matchWholeWords = s.caseMode === 'passthrough' ? !!raw.matchWholeWords : null;
+    var groupSource = sourceField(raw, 'inclusionGroupRaw');
+    if (!groupSource) groupSource = sourceField(raw, 'group');
+    var group = groupSource || '';
+
+    var delaySource = sourceField(raw, 'delay');
+    var minMessagesSource = sourceField(raw, 'minMessages');
+    var delay = typeof delaySource === 'number' ? delaySource
+      : ((typeof minMessagesSource === 'number' && minMessagesSource > 0) ? minMessagesSource : 0);
+
+    var probabilitySource = sourceField(raw, 'probability');
+    var probability = typeof probabilitySource === 'number' ? Math.max(0, Math.min(100, probabilitySource)) : 100;
+
+    var groupWeightSource = sourceField(raw, 'groupWeight');
+    var groupWeight = typeof groupWeightSource === 'number' ? groupWeightSource : 100;
+
+    var selectiveLogicSource = sourceField(raw, 'selectiveLogic');
+    var selectiveLogic = typeof selectiveLogicSource === 'number' ? selectiveLogicSource : 0;
+
+    var caseSensitiveSource = sourceField(raw, 'caseSensitive');
+    if (caseSensitiveSource === undefined) caseSensitiveSource = sourceField(raw, 'case_sensitive');
+    var matchWholeWordsSource = sourceField(raw, 'matchWholeWords');
+    var caseSensitive, matchWholeWords;
+    if (s.preserveExisting && typeof caseSensitiveSource === 'boolean') {
+      caseSensitive = caseSensitiveSource;
+    } else {
+      caseSensitive = s.caseMode === 'passthrough' ? !!raw.case_sensitive : null;
+    }
+    if (s.preserveExisting && typeof matchWholeWordsSource === 'boolean') {
+      matchWholeWords = matchWholeWordsSource;
+    } else {
+      matchWholeWords = s.caseMode === 'passthrough' ? !!raw.matchWholeWords : null;
+    }
 
     var leftover = {};
     var hasLeftover = false;
@@ -456,24 +540,24 @@
       comment: String(comment), content: String(content),
       constant: constant, vectorized: vectorized,
       selective: keysecondary.length > 0,
-      selectiveLogic: typeof raw.selectiveLogic === 'number' ? raw.selectiveLogic : 0,
+      selectiveLogic: selectiveLogic,
       addMemo: Boolean(comment),
       order: order, position: position,
       disable: disable, enabled: !disable,
       excludeRecursion: excludeRecursion, preventRecursion: preventRecursion,
-      delayUntilRecursion: s.delayUntilRecursion,
+      delayUntilRecursion: delayUntilRecursion,
       probability: probability, useProbability: true,
       depth: depth, group: group, groupOverride: false,
-      groupWeight: typeof raw.groupWeight === 'number' ? raw.groupWeight : 100,
+      groupWeight: groupWeight,
       scanDepth: null, caseSensitive: caseSensitive, matchWholeWords: matchWholeWords,
       useGroupScoring: null, automationId: '', role: role,
       sticky: 0, cooldown: 0, delay: delay, displayIndex: idx,
-      matchScenario: s.matchScenario,
+      matchScenario: matchScenario,
       matchCharacterDescription: matchCharacterDescription,
       matchPersonaDescription: matchPersonaDescription,
-      matchCharacterPersonality: s.matchCharacterPersonality,
-      matchCharacterDepthPrompt: s.matchCharacterDepthPrompt,
-      matchCreatorNotes: s.matchCreatorNotes,
+      matchCharacterPersonality: matchCharacterPersonality,
+      matchCharacterDepthPrompt: matchCharacterDepthPrompt,
+      matchCreatorNotes: matchCreatorNotes,
       extensions: extensions,
     };
   }
