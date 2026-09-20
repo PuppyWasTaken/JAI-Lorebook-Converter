@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_ORDER_BASE = 300
+DEFAULT_ORDER_BASE = 100
 DEFAULT_ORDER_STEP = 5
 DEFAULT_POSITION = 4   # @Depth
 DEFAULT_DEPTH = 3      # verified: default when source omits "depth"
@@ -41,7 +41,33 @@ ACCOUNTED_FOR = {
     "insertion_order", "order", "priority", "position", "enabled", "disable",
     "probability", "depth", "groupWeight", "extensions", "tags", "group",
     "inclusionGroupRaw", "minMessages", "role",
+    # ST-side fields this tool itself writes out. Listed here so re-running
+    # a conversion on an already-converted file doesn't treat them as
+    # "unmapped" and stuff them into a fresh extensions.janitorai_source,
+    # which would clobber the real original-source data already nested there.
+    "uid", "vectorized", "addMemo", "useProbability", "groupOverride",
+    "scanDepth", "caseSensitive", "matchWholeWords", "useGroupScoring",
+    "automationId", "sticky", "cooldown", "delay", "displayIndex",
+    "matchScenario", "matchCharacterDescription", "matchPersonaDescription",
+    "matchCharacterPersonality", "matchCharacterDepthPrompt", "matchCreatorNotes",
+    "excludeRecursion", "preventRecursion", "delayUntilRecursion",
 }
+
+
+def source_field(entry: dict[str, Any], name: str) -> Any:
+    """Look for `name` on the entry itself, then in extensions, then in
+    extensions.janitorai_source (where a prior conversion may have tucked
+    away the original JanitorAI fields). Returns None if not found anywhere."""
+    if name in entry and entry[name] is not None:
+        return entry[name]
+    ext = entry.get("extensions")
+    if isinstance(ext, dict):
+        if name in ext and ext[name] is not None:
+            return ext[name]
+        js = ext.get("janitorai_source")
+        if isinstance(js, dict) and name in js and js[name] is not None:
+            return js[name]
+    return None
 
 
 def extract_entries(data: Any) -> list[dict[str, Any]]:
@@ -81,6 +107,7 @@ def convert_entry(
     match_character_depth_prompt: bool = False,
     match_creator_notes: bool = False,
     preserve_metadata: bool = True,
+    preserve_existing_settings: bool = True,
 ) -> dict[str, Any]:
 
     key = entry.get("key") if isinstance(entry.get("key"), list) else (entry.get("keys") if isinstance(entry.get("keys"), list) else [])
@@ -92,22 +119,37 @@ def convert_entry(
     constant = bool(entry.get("constant", False)) or activation_mode == "constant"
     vectorized = activation_mode == "vectorized"
 
-    # order: verified formula, ranked by "priority" (falls back to insertion_order, then position in file)
-    priority = entry.get("priority")
-    if not isinstance(priority, (int, float)):
-        priority = entry.get("insertion_order")
-    if not isinstance(priority, (int, float)):
-        priority = index + 1
-    order = round(order_base - (priority - 1) * order_step)
+    # order: preserved as-is when preserve_existing_settings is on and the
+    # entry already has one (e.g. reprocessing a previous conversion);
+    # otherwise recomputed from priority/insertion_order, also checking
+    # extensions/extensions.janitorai_source in case that's where it's tucked away.
+    existing_order = source_field(entry, "order")
+    if preserve_existing_settings and isinstance(existing_order, (int, float)):
+        order = existing_order
+    else:
+        priority = source_field(entry, "priority")
+        if not isinstance(priority, (int, float)):
+            priority = source_field(entry, "insertion_order")
+        if not isinstance(priority, (int, float)):
+            priority = index + 1
+        order = round(order_base - (priority - 1) * order_step)
 
-    position = entry.get("position") if isinstance(entry.get("position"), (int, float)) else default_position
-    depth = entry.get("depth") if isinstance(entry.get("depth"), (int, float)) else default_depth
-    role = entry.get("role") if isinstance(entry.get("role"), (int, float)) else default_role
+    position_src = source_field(entry, "position")
+    depth_src = source_field(entry, "depth")
+    role_src = source_field(entry, "role")
+    position = position_src if isinstance(position_src, (int, float)) else default_position
+    depth = depth_src if isinstance(depth_src, (int, float)) else default_depth
+    role = role_src if isinstance(role_src, (int, float)) else default_role
 
-    disable = entry.get("enabled") is False
+    enabled_src = source_field(entry, "enabled")
+    disable_src = source_field(entry, "disable")
+    disable = disable_src is True or enabled_src is False
 
     tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
-    if prevent_recursion_mode == "on":
+    prevent_recursion_src = source_field(entry, "preventRecursion")
+    if preserve_existing_settings and isinstance(prevent_recursion_src, bool):
+        prevent_recursion = prevent_recursion_src
+    elif prevent_recursion_mode == "on":
         prevent_recursion = True
     elif prevent_recursion_mode == "off":
         prevent_recursion = False
@@ -115,23 +157,57 @@ def convert_entry(
         prevent_recursion = "world" in tags
 
     is_transient = depth_one_special and depth == 1
-    match_char_desc = False if is_transient else match_character_description
-    match_persona_desc = False if is_transient else match_persona_description
-    exclude_recursion = True if is_transient else exclude_recursion_default
 
-    group = str(entry.get("inclusionGroupRaw") or entry.get("group") or "")
+    def resolve_match_bool(name: str, transient_override: bool | None, settings_default: bool) -> bool:
+        existing = source_field(entry, name)
+        if preserve_existing_settings and isinstance(existing, bool):
+            return existing
+        if transient_override is not None:
+            return transient_override
+        return settings_default
 
-    min_messages = entry.get("minMessages")
-    delay = int(min_messages) if isinstance(min_messages, (int, float)) and min_messages > 0 else 0
+    match_char_desc = resolve_match_bool("matchCharacterDescription", False if is_transient else None, match_character_description)
+    match_persona_desc = resolve_match_bool("matchPersonaDescription", False if is_transient else None, match_persona_description)
+    exclude_recursion = resolve_match_bool("excludeRecursion", True if is_transient else None, exclude_recursion_default)
+    match_scenario = resolve_match_bool("matchScenario", None, match_scenario)
+    match_character_personality = resolve_match_bool("matchCharacterPersonality", None, match_character_personality)
+    match_character_depth_prompt = resolve_match_bool("matchCharacterDepthPrompt", None, match_character_depth_prompt)
+    match_creator_notes = resolve_match_bool("matchCreatorNotes", None, match_creator_notes)
+    delay_until_recursion = resolve_match_bool("delayUntilRecursion", None, delay_until_recursion)
 
-    probability = entry.get("probability", 100)
-    probability = max(0, min(100, int(probability))) if isinstance(probability, (int, float)) else 100
+    group = str(source_field(entry, "inclusionGroupRaw") or source_field(entry, "group") or "")
 
-    if case_mode == "passthrough":
-        case_sensitive: Any = bool(entry.get("case_sensitive", False))
-        match_whole_words: Any = bool(entry.get("matchWholeWords", False))
+    delay_src = source_field(entry, "delay")
+    min_messages = source_field(entry, "minMessages")
+    if isinstance(delay_src, (int, float)):
+        delay = int(delay_src)
+    else:
+        delay = int(min_messages) if isinstance(min_messages, (int, float)) and min_messages > 0 else 0
+
+    probability_src = source_field(entry, "probability")
+    probability = max(0, min(100, int(probability_src))) if isinstance(probability_src, (int, float)) else 100
+
+    group_weight_src = source_field(entry, "groupWeight")
+    group_weight = int(group_weight_src) if isinstance(group_weight_src, (int, float)) else 100
+
+    selective_logic_src = source_field(entry, "selectiveLogic")
+    selective_logic = int(selective_logic_src) if isinstance(selective_logic_src, (int, float)) else 0
+
+    case_sensitive_src = source_field(entry, "caseSensitive")
+    if case_sensitive_src is None:
+        case_sensitive_src = source_field(entry, "case_sensitive")
+    match_whole_words_src = source_field(entry, "matchWholeWords")
+    if preserve_existing_settings and isinstance(case_sensitive_src, bool):
+        case_sensitive: Any = case_sensitive_src
+    elif case_mode == "passthrough":
+        case_sensitive = bool(entry.get("case_sensitive", False))
     else:
         case_sensitive = None
+    if preserve_existing_settings and isinstance(match_whole_words_src, bool):
+        match_whole_words: Any = match_whole_words_src
+    elif case_mode == "passthrough":
+        match_whole_words = bool(entry.get("matchWholeWords", False))
+    else:
         match_whole_words = None
 
     leftover = {k: v for k, v in entry.items() if k not in ACCOUNTED_FOR}
@@ -153,7 +229,7 @@ def convert_entry(
         "constant": constant,
         "vectorized": vectorized,
         "selective": bool(secondary),
-        "selectiveLogic": int(entry.get("selectiveLogic", 0) or 0),
+        "selectiveLogic": selective_logic,
         "addMemo": bool(display_name),
         "order": order,
         "position": position,
@@ -167,7 +243,7 @@ def convert_entry(
         "depth": depth,
         "group": group,
         "groupOverride": False,
-        "groupWeight": int(entry.get("groupWeight", 100) or 100),
+        "groupWeight": group_weight,
         "scanDepth": None,
         "caseSensitive": case_sensitive,
         "matchWholeWords": match_whole_words,
@@ -223,6 +299,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--match-character-depth-prompt", action="store_true")
     p.add_argument("--match-creator-notes", action="store_true")
     p.add_argument("--no-preserve-metadata", action="store_true")
+    p.add_argument(
+        "--no-preserve-existing",
+        action="store_true",
+        help=(
+            "By default, any field an entry already has a value for (position, recursion/match "
+            "toggles, order, probability, etc. — including values nested in extensions or "
+            "extensions.janitorai_source from a prior conversion) is kept as-is, and the other "
+            "options here only fill in what's missing. Pass this to force every entry to the "
+            "values given above instead."
+        ),
+    )
     return p
 
 
@@ -255,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
             match_character_depth_prompt=args.match_character_depth_prompt,
             match_creator_notes=args.match_creator_notes,
             preserve_metadata=not args.no_preserve_metadata,
+            preserve_existing_settings=not args.no_preserve_existing,
         )
         args.output.write_text(json.dumps(converted, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
