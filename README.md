@@ -1,2 +1,8 @@
 # JAI-Lorebook-Converter
-Converts JAI lorebooks to ST JSON lorebooks. DOES NOT WORK FOR ADVANCED SCRIPTS.
+Quick tool to convert JanitorAI lorebooks to ST JSON lorebooks. DOES NOT WORK FOR ADVANCED SCRIPTS.
+Please always double-check and manually adjust your lorebooks AFTER importing to ST. 
+This tool is just to save the effort of manually copy-pasting each entry. 
+
+JAI currently allows you to import lorebooks from ST to the scripts page, but not export existing lorebooks for a JSON format. This just simplifies the process. 
+
+
