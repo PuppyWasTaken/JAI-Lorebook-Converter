@@ -237,7 +237,7 @@
       <div class="opt">
         <label for="preventRecursionSel">preventRecursion</label>
         <select id="preventRecursionSel">
-          <option value="auto" selected>Auto — on when tags include "world"</option>
+          <option value="auto" selected>Auto — this tool's heuristic: on when tags include "world"</option>
           <option value="on">Always on</option>
           <option value="off">Always off</option>
         </select>
@@ -251,7 +251,7 @@
       </div>
     </div>
     <div class="opt-grid" style="margin-top:0.6rem;">
-      <label class="opt-check"><input type="checkbox" id="depthOneSpecial" checked> Treat depth-1 entries as transient (skip description/persona match, exclude recursion)</label>
+      <label class="opt-check"><input type="checkbox" id="depthOneSpecial" checked> Treat depth-1 entries as transient (skip description/persona match, exclude recursion) — this tool's own conversion policy (inferred from one verified example), not a SillyTavern rule</label>
       <label class="opt-check"><input type="checkbox" id="excludeRecursionDefault"> excludeRecursion (baseline, non-transient entries)</label>
       <label class="opt-check"><input type="checkbox" id="delayUntilRecursion"> delayUntilRecursion</label>
     </div>
@@ -284,12 +284,12 @@
         <tr><td><code>order</code></td><td>formula above, from <code>priority</code>. Expect that you may need to hand-tune afterward.</td></tr>
         <tr><td><code>position</code> / <code>depth</code> / <code>role</code></td><td>from the source when present, else the Advanced settings above (verified defaults: position 4, depth 3, role 0).</td></tr>
         <tr><td><code>disable</code> / <code>enabled</code></td><td><code>enabled: false</code> in the source → <code>disable: true</code>; both fields written.</td></tr>
-        <tr><td><code>preventRecursion</code></td><td>Auto mode: true when <code>tags</code> includes <code>"world"</code></td></tr>
+        <tr><td><code>preventRecursion</code></td><td>Auto mode (this tool's heuristic, not a SillyTavern rule): true when <code>tags</code> includes <code>"world"</code></td></tr>
         <tr><td><code>group</code></td><td>from <code>inclusionGroupRaw</code>, falling back to <code>group</code>, else empty.</td></tr>
         <tr><td><code>delay</code></td><td>from <code>minMessages</code> when &gt; 0, else 0.</td></tr>
         <tr><td><code>probability</code> / <code>groupWeight</code></td><td>copied directly, default 100.</td></tr>
         <tr><td><code>caseSensitive</code> / <code>matchWholeWords</code></td><td>null by default — the reference book had these null even where the source set <code>matchWholeWords: true</code>. Switchable to pass-through above.</td></tr>
-        <tr><td>match* fields</td><td>from the checkboxes above; the depth-1 rule can override description/persona to false and force <code>excludeRecursion</code> true for that entry.</td></tr>
+        <tr><td>match* fields</td><td>from the checkboxes above; the depth-1 rule above (this tool's own policy, not something SillyTavern requires) can override description/persona to false and force <code>excludeRecursion</code> true for that entry.</td></tr>
         <tr><td><code>extensions</code></td><td>mirrors <code>{position, role, depth, sticky, cooldown, delay}</code> (matches the reference book's legacy-compat duplication), plus unmapped source fields under <code>extensions.janitorai_source</code> when preservation is on.</td></tr>
         <tr><td>"Preserve existing settings"</td><td>when on, any field the entry already has a value for — at the top level, under <code>extensions</code>, or nested in <code>extensions.janitorai_source</code> from an earlier conversion — is kept as-is, including <code>order</code>. Advanced settings above are only used to fill in what's actually missing. Turn it off to force every entry to the Advanced settings values instead.</td></tr>
       </tbody>
@@ -435,7 +435,10 @@
 
     var activationMode = String(raw.activationMode || '').toLowerCase();
     var constant = raw.constant === true || activationMode === 'constant';
-    var vectorized = activationMode === 'vectorized';
+    var vectorizedSource = sourceField(raw, 'vectorized');
+    var vectorized = (s.preserveExisting && typeof vectorizedSource === 'boolean')
+      ? vectorizedSource
+      : activationMode === 'vectorized';
 
     // order: preserved as-is when preserveExisting is on and the entry
     // already has one (e.g. reprocessing a previous conversion); otherwise
@@ -454,9 +457,9 @@
     var positionSource = sourceField(raw, 'position');
     var depthSource = sourceField(raw, 'depth');
     var roleSource = sourceField(raw, 'role');
-    var position = typeof positionSource === 'number' ? positionSource : s.position;
-    var depth = typeof depthSource === 'number' ? depthSource : s.defaultDepth;
-    var role = typeof roleSource === 'number' ? roleSource : s.role;
+    var position = (s.preserveExisting && typeof positionSource === 'number') ? positionSource : s.position;
+    var depth = (s.preserveExisting && typeof depthSource === 'number') ? depthSource : s.defaultDepth;
+    var role = (s.preserveExisting && typeof roleSource === 'number') ? roleSource : s.role;
 
     var enabledSource = sourceField(raw, 'enabled');
     var disableSource = sourceField(raw, 'disable');
@@ -511,13 +514,36 @@
     if (s.preserveExisting && typeof caseSensitiveSource === 'boolean') {
       caseSensitive = caseSensitiveSource;
     } else {
-      caseSensitive = s.caseMode === 'passthrough' ? !!raw.case_sensitive : null;
+      // Passthrough should use the same resolved source (camelCase, snake_case,
+      // and extensions/janitorai_source) as the preserveExisting branch above —
+      // reading raw.case_sensitive directly here missed camelCase/nested values.
+      caseSensitive = s.caseMode === 'passthrough' ? !!caseSensitiveSource : null;
     }
     if (s.preserveExisting && typeof matchWholeWordsSource === 'boolean') {
       matchWholeWords = matchWholeWordsSource;
     } else {
-      matchWholeWords = s.caseMode === 'passthrough' ? !!raw.matchWholeWords : null;
+      matchWholeWords = s.caseMode === 'passthrough' ? !!matchWholeWordsSource : null;
     }
+
+    var stickySource = sourceField(raw, 'sticky');
+    var sticky = (s.preserveExisting && typeof stickySource === 'number') ? stickySource : 0;
+    var cooldownSource = sourceField(raw, 'cooldown');
+    var cooldown = (s.preserveExisting && typeof cooldownSource === 'number') ? cooldownSource : 0;
+    var useProbabilitySource = sourceField(raw, 'useProbability');
+    var useProbability = (s.preserveExisting && typeof useProbabilitySource === 'boolean') ? useProbabilitySource : true;
+    var scanDepthSource = sourceField(raw, 'scanDepth');
+    var scanDepth = (s.preserveExisting && typeof scanDepthSource === 'number') ? scanDepthSource : null;
+
+    // groupOverride ("Prioritize Inclusion"), useGroupScoring, and automationId
+    // are ST-native settings too — same class of bug as sticky/cooldown/etc.
+    // above: previously hardcoded regardless of preserveExisting, so a value
+    // set in ST and round-tripped through this tool would get silently wiped.
+    var groupOverrideSource = sourceField(raw, 'groupOverride');
+    var groupOverride = (s.preserveExisting && typeof groupOverrideSource === 'boolean') ? groupOverrideSource : false;
+    var useGroupScoringSource = sourceField(raw, 'useGroupScoring');
+    var useGroupScoring = (s.preserveExisting && typeof useGroupScoringSource === 'boolean') ? useGroupScoringSource : null;
+    var automationIdSource = sourceField(raw, 'automationId');
+    var automationId = (s.preserveExisting && typeof automationIdSource === 'string') ? automationIdSource : '';
 
     var leftover = {};
     var hasLeftover = false;
@@ -533,10 +559,16 @@
     extensions.position = position;
     extensions.role = role;
     extensions.depth = depth;
-    extensions.sticky = 0;
-    extensions.cooldown = 0;
+    extensions.sticky = sticky;
+    extensions.cooldown = cooldown;
     extensions.delay = delay;
-    if (s.preserveMeta && hasLeftover) extensions.janitorai_source = leftover;
+    if (s.preserveMeta && hasLeftover) {
+      // Merge into any janitorai_source already carried over from raw.extensions
+      // (e.g. from a prior conversion) instead of replacing it outright, so
+      // newly-unmapped fields don't wipe out previously preserved metadata.
+      var priorSource = (extensions.janitorai_source && typeof extensions.janitorai_source === 'object') ? extensions.janitorai_source : null;
+      extensions.janitorai_source = priorSource ? Object.assign({}, priorSource, leftover) : leftover;
+    }
 
     return {
       uid: idx, key: key, keysecondary: keysecondary,
@@ -549,12 +581,12 @@
       disable: disable, enabled: !disable,
       excludeRecursion: excludeRecursion, preventRecursion: preventRecursion,
       delayUntilRecursion: delayUntilRecursion,
-      probability: probability, useProbability: true,
-      depth: depth, group: group, groupOverride: false,
+      probability: probability, useProbability: useProbability,
+      depth: depth, group: group, groupOverride: groupOverride,
       groupWeight: groupWeight,
-      scanDepth: null, caseSensitive: caseSensitive, matchWholeWords: matchWholeWords,
-      useGroupScoring: null, automationId: '', role: role,
-      sticky: 0, cooldown: 0, delay: delay, displayIndex: idx,
+      scanDepth: scanDepth, caseSensitive: caseSensitive, matchWholeWords: matchWholeWords,
+      useGroupScoring: useGroupScoring, automationId: automationId, role: role,
+      sticky: sticky, cooldown: cooldown, delay: delay, displayIndex: idx,
       matchScenario: matchScenario,
       matchCharacterDescription: matchCharacterDescription,
       matchPersonaDescription: matchPersonaDescription,

@@ -117,7 +117,8 @@ def convert_entry(
 
     activation_mode = str(entry.get("activationMode") or "").lower()
     constant = bool(entry.get("constant", False)) or activation_mode == "constant"
-    vectorized = activation_mode == "vectorized"
+    vectorized_src = source_field(entry, "vectorized")
+    vectorized = vectorized_src if (preserve_existing_settings and isinstance(vectorized_src, bool)) else activation_mode == "vectorized"
 
     # order: preserved as-is when preserve_existing_settings is on and the
     # entry already has one (e.g. reprocessing a previous conversion);
@@ -137,9 +138,9 @@ def convert_entry(
     position_src = source_field(entry, "position")
     depth_src = source_field(entry, "depth")
     role_src = source_field(entry, "role")
-    position = position_src if isinstance(position_src, (int, float)) else default_position
-    depth = depth_src if isinstance(depth_src, (int, float)) else default_depth
-    role = role_src if isinstance(role_src, (int, float)) else default_role
+    position = position_src if (preserve_existing_settings and isinstance(position_src, (int, float))) else default_position
+    depth = depth_src if (preserve_existing_settings and isinstance(depth_src, (int, float))) else default_depth
+    role = role_src if (preserve_existing_settings and isinstance(role_src, (int, float))) else default_role
 
     enabled_src = source_field(entry, "enabled")
     disable_src = source_field(entry, "disable")
@@ -200,25 +201,56 @@ def convert_entry(
     if preserve_existing_settings and isinstance(case_sensitive_src, bool):
         case_sensitive: Any = case_sensitive_src
     elif case_mode == "passthrough":
-        case_sensitive = bool(entry.get("case_sensitive", False))
+        # Use the already-resolved source (camelCase, snake_case, and
+        # extensions/janitorai_source) rather than entry.get("case_sensitive")
+        # directly, which missed camelCase/nested values.
+        case_sensitive = bool(case_sensitive_src)
     else:
         case_sensitive = None
     if preserve_existing_settings and isinstance(match_whole_words_src, bool):
         match_whole_words: Any = match_whole_words_src
     elif case_mode == "passthrough":
-        match_whole_words = bool(entry.get("matchWholeWords", False))
+        match_whole_words = bool(match_whole_words_src)
     else:
         match_whole_words = None
+
+    sticky_src = source_field(entry, "sticky")
+    sticky = int(sticky_src) if (preserve_existing_settings and isinstance(sticky_src, (int, float))) else 0
+    cooldown_src = source_field(entry, "cooldown")
+    cooldown = int(cooldown_src) if (preserve_existing_settings and isinstance(cooldown_src, (int, float))) else 0
+    use_probability_src = source_field(entry, "useProbability")
+    use_probability = use_probability_src if (preserve_existing_settings and isinstance(use_probability_src, bool)) else True
+    scan_depth_src = source_field(entry, "scanDepth")
+    scan_depth = int(scan_depth_src) if (preserve_existing_settings and isinstance(scan_depth_src, (int, float))) else None
+
+    # groupOverride ("Prioritize Inclusion"), useGroupScoring, and automationId
+    # are ST-native settings too — same class of bug as sticky/cooldown/etc.
+    # above: previously hardcoded regardless of preserve_existing_settings, so
+    # a value set in ST and round-tripped through this tool would get wiped.
+    group_override_src = source_field(entry, "groupOverride")
+    group_override = group_override_src if (preserve_existing_settings and isinstance(group_override_src, bool)) else False
+    use_group_scoring_src = source_field(entry, "useGroupScoring")
+    use_group_scoring = use_group_scoring_src if (preserve_existing_settings and isinstance(use_group_scoring_src, bool)) else None
+    automation_id_src = source_field(entry, "automationId")
+    automation_id = automation_id_src if (preserve_existing_settings and isinstance(automation_id_src, str)) else ""
 
     leftover = {k: v for k, v in entry.items() if k not in ACCOUNTED_FOR}
 
     extensions: dict[str, Any] = dict(entry.get("extensions") or {})
     extensions.update({
         "position": position, "role": role, "depth": depth,
-        "sticky": 0, "cooldown": 0, "delay": delay,
+        "sticky": sticky, "cooldown": cooldown, "delay": delay,
     })
     if preserve_metadata and leftover:
-        extensions["janitorai_source"] = leftover
+        # Merge into any janitorai_source already carried over from
+        # entry["extensions"] (e.g. from a prior conversion) instead of
+        # replacing it outright, so newly-unmapped fields don't wipe out
+        # previously preserved metadata.
+        prior_source = extensions.get("janitorai_source")
+        if isinstance(prior_source, dict):
+            extensions["janitorai_source"] = {**prior_source, **leftover}
+        else:
+            extensions["janitorai_source"] = leftover
 
     return {
         "uid": index,
@@ -239,19 +271,19 @@ def convert_entry(
         "preventRecursion": prevent_recursion,
         "delayUntilRecursion": delay_until_recursion,
         "probability": probability,
-        "useProbability": True,
+        "useProbability": use_probability,
         "depth": depth,
         "group": group,
-        "groupOverride": False,
+        "groupOverride": group_override,
         "groupWeight": group_weight,
-        "scanDepth": None,
+        "scanDepth": scan_depth,
         "caseSensitive": case_sensitive,
         "matchWholeWords": match_whole_words,
-        "useGroupScoring": None,
-        "automationId": "",
+        "useGroupScoring": use_group_scoring,
+        "automationId": automation_id,
         "role": role,
-        "sticky": 0,
-        "cooldown": 0,
+        "sticky": sticky,
+        "cooldown": cooldown,
         "delay": delay,
         "displayIndex": index,
         "matchScenario": match_scenario,
