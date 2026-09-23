@@ -27,6 +27,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 DEFAULT_ORDER_BASE = 100
@@ -57,17 +58,31 @@ ACCOUNTED_FOR = {
 def source_field(entry: dict[str, Any], name: str) -> Any:
     """Look for `name` on the entry itself, then in extensions, then in
     extensions.janitorai_source (where a prior conversion may have tucked
-    away the original JanitorAI fields). Returns None if not found anywhere."""
-    if name in entry and entry[name] is not None:
+    away the original JanitorAI fields). A present null value is preserved;
+    only a missing key falls through to the next source."""
+    if name in entry:
         return entry[name]
     ext = entry.get("extensions")
     if isinstance(ext, dict):
-        if name in ext and ext[name] is not None:
+        if name in ext:
             return ext[name]
         js = ext.get("janitorai_source")
-        if isinstance(js, dict) and name in js and js[name] is not None:
+        if isinstance(js, dict) and name in js:
             return js[name]
     return None
+
+
+def _half_up_round(value: int | float) -> int:
+    """Round like JavaScript Math.round for the positive/fractional values used here."""
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _to_key_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if isinstance(value, str) and value.strip():
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
 
 
 def extract_entries(data: Any) -> list[dict[str, Any]]:
@@ -77,9 +92,18 @@ def extract_entries(data: Any) -> list[dict[str, Any]]:
         return data["entries"]
     if isinstance(data, dict) and isinstance(data.get("entries"), dict):
         items = data["entries"]
-        return [items[k] for k in sorted(items, key=lambda x: int(x) if str(x).isdigit() else str(x))]
+
+        def _entry_sort_key(k: Any) -> tuple[int, int, str]:
+            s = str(k)
+            if s.isdigit():
+                return (0, int(s), "")
+            return (1, 0, s)
+
+        return [items[k] for k in sorted(items, key=_entry_sort_key)]
     if isinstance(data, dict) and isinstance(data.get("lorebook"), list):
         return data["lorebook"]
+    if isinstance(data, dict) and ("content" in data or "key" in data or "keys" in data):
+        return [data]
     raise ValueError(
         "Unsupported JSON shape. Expected a JanitorAI entry array, an object "
         "with an 'entries' array/object, or an object with a 'lorebook' array."
@@ -110,10 +134,10 @@ def convert_entry(
     preserve_existing_settings: bool = True,
 ) -> dict[str, Any]:
 
-    key = entry.get("key") if isinstance(entry.get("key"), list) else (entry.get("keys") if isinstance(entry.get("keys"), list) else [])
-    secondary = entry.get("keysecondary") if isinstance(entry.get("keysecondary"), list) else (entry.get("secondary_keys") if isinstance(entry.get("secondary_keys"), list) else [])
+    key = _to_key_list(entry.get("key")) or _to_key_list(entry.get("keys"))
+    secondary = _to_key_list(entry.get("keysecondary")) or _to_key_list(entry.get("secondary_keys"))
 
-    display_name = str((entry.get("comment") or "").strip() or entry.get("name") or f"Entry {index}")
+    display_name = str(entry.get("comment") or "").strip() or str(entry.get("name") or "") or f"Entry {index}"
 
     activation_mode = str(entry.get("activationMode") or "").lower()
     constant = bool(entry.get("constant", False)) or activation_mode == "constant"
@@ -133,7 +157,7 @@ def convert_entry(
             priority = source_field(entry, "insertion_order")
         if not isinstance(priority, (int, float)):
             priority = index + 1
-        order = round(order_base - (priority - 1) * order_step)
+        order = _half_up_round(order_base - (priority - 1) * order_step)
 
     position_src = source_field(entry, "position")
     depth_src = source_field(entry, "depth")
@@ -181,12 +205,12 @@ def convert_entry(
     delay_src = source_field(entry, "delay")
     min_messages = source_field(entry, "minMessages")
     if isinstance(delay_src, (int, float)):
-        delay = int(delay_src)
+        delay = _half_up_round(delay_src)
     else:
-        delay = int(min_messages) if isinstance(min_messages, (int, float)) and min_messages > 0 else 0
+        delay = _half_up_round(min_messages) if isinstance(min_messages, (int, float)) and min_messages > 0 else 0
 
     probability_src = source_field(entry, "probability")
-    probability = max(0, min(100, int(probability_src))) if isinstance(probability_src, (int, float)) else 100
+    probability = max(0, min(100, _half_up_round(probability_src))) if isinstance(probability_src, (int, float)) else 100
 
     group_weight_src = source_field(entry, "groupWeight")
     group_weight = int(group_weight_src) if isinstance(group_weight_src, (int, float)) else 100
@@ -195,8 +219,12 @@ def convert_entry(
     selective_logic = int(selective_logic_src) if isinstance(selective_logic_src, (int, float)) else 0
 
     case_sensitive_src = source_field(entry, "caseSensitive")
-    if case_sensitive_src is None:
-        case_sensitive_src = source_field(entry, "case_sensitive")
+    if "caseSensitive" not in entry:
+        ext = entry.get("extensions")
+        if isinstance(ext, dict) and "caseSensitive" not in ext:
+            js = ext.get("janitorai_source")
+            if not isinstance(js, dict) or "caseSensitive" not in js:
+                case_sensitive_src = source_field(entry, "case_sensitive")
     match_whole_words_src = source_field(entry, "matchWholeWords")
     if preserve_existing_settings and isinstance(case_sensitive_src, bool):
         case_sensitive: Any = case_sensitive_src
@@ -257,7 +285,7 @@ def convert_entry(
         "key": key,
         "keysecondary": secondary,
         "comment": display_name,
-        "content": str(entry.get("content", "")),
+        "content": str(entry.get("content") or ""),
         "constant": constant,
         "vectorized": vectorized,
         "selective": bool(secondary),

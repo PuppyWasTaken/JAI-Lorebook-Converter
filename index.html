@@ -163,10 +163,10 @@
         <span class="panel-title">Source</span>
         <span class="panel-sub">JanitorAI-style JSON</span>
       </div>
-      <textarea id="input" spellcheck="false" placeholder="Paste a JanitorAI lorebook text here, or load a file below."></textarea>
+      <textarea id="input" aria-label="Source — JanitorAI-style JSON" spellcheck="false" placeholder="Paste a JanitorAI lorebook text here, or load a file below."></textarea>
       <div class="row">
         <button id="pickFile">Load a file…</button>
-        <input type="file" id="fileInput" accept="application/json,.json">
+        <input type="file" id="fileInput" accept="application/json,.json" aria-label="Load a JanitorAI lorebook JSON file">
         <button id="loadExample">Load example</button>
         <button id="clearInput">Clear</button>
       </div>
@@ -177,7 +177,7 @@
         <span class="panel-title">Output</span>
         <span class="panel-sub">SillyTavern World Info JSON</span>
       </div>
-      <textarea id="output" spellcheck="false" readonly placeholder="Converted JSON will appear here."></textarea>
+      <textarea id="output" aria-label="Output — SillyTavern World Info JSON" spellcheck="false" readonly placeholder="Converted JSON will appear here."></textarea>
       <div class="row">
         <button id="copyOutput" disabled>Copy</button>
         <button id="downloadOutput" disabled>Download .json</button>
@@ -188,7 +188,7 @@
   <div class="center-actions">
     <button class="primary" id="convertBtn">Convert →</button>
   </div>
-  <div id="status" class="status"></div>
+  <div id="status" class="status" aria-live="polite" aria-atomic="true"></div>
 
   <details>
     <summary>Advanced settings</summary>
@@ -351,7 +351,7 @@
 
   function toArray(v) {
     if (v === null || v === undefined) return [];
-    if (Array.isArray(v)) return v.map(String);
+    if (Array.isArray(v)) return v.filter((x) => x != null).map(String).filter(Boolean);
     if (typeof v === 'string') return v.split(',').map((s) => s.trim()).filter(Boolean);
     return [];
   }
@@ -388,12 +388,29 @@
     excludeRecursion: 1, preventRecursion: 1, delayUntilRecursion: 1,
   };
 
+  function parseIntField(id, fallback) {
+    var raw = $(id).value.trim();
+    if (raw === '') return fallback;
+    var n = Number(raw);
+    if (!Number.isFinite(n)) {
+      setStatus(id + ' must be a number.', 'error');
+      return null;
+    }
+    return Math.round(n);
+  }
+
   function readSettings() {
+    var orderBase = parseIntField('orderBase', 100);
+    if (orderBase === null) return null;
+    var orderStep = parseIntField('orderStep', 5);
+    if (orderStep === null) return null;
+    var defaultDepth = parseIntField('defaultDepth', 3);
+    if (defaultDepth === null) return null;
     return {
-      orderBase: Number($('orderBase').value) || 0,
-      orderStep: Number($('orderStep').value) || 0,
+      orderBase: orderBase,
+      orderStep: orderStep,
       position: Number($('positionSel').value),
-      defaultDepth: Number($('defaultDepth').value) || 0,
+      defaultDepth: defaultDepth,
       role: Number($('roleSel').value),
       preventRecursionMode: $('preventRecursionSel').value,
       caseMode: $('caseModeSel').value,
@@ -427,11 +444,13 @@
   }
 
   function convertEntry(raw, idx, s) {
-    if (!raw || typeof raw !== 'object') raw = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('Entry must be a JSON object.');
+    }
     var key = toArray(raw.key !== undefined ? raw.key : raw.keys);
     var keysecondary = toArray(raw.keysecondary !== undefined ? raw.keysecondary : raw.secondary_keys);
     var comment = (raw.comment && String(raw.comment).trim()) || raw.name || ('Entry ' + idx);
-    var content = raw.content !== undefined ? raw.content : '';
+    var content = (raw.content != null) ? raw.content : '';
 
     var activationMode = String(raw.activationMode || '').toLowerCase();
     var constant = raw.constant === true || activationMode === 'constant';
@@ -491,15 +510,17 @@
 
     var groupSource = sourceField(raw, 'inclusionGroupRaw');
     if (!groupSource) groupSource = sourceField(raw, 'group');
-    var group = groupSource || '';
+    var group = String(groupSource || '');
 
     var delaySource = sourceField(raw, 'delay');
     var minMessagesSource = sourceField(raw, 'minMessages');
-    var delay = typeof delaySource === 'number' ? delaySource
-      : ((typeof minMessagesSource === 'number' && minMessagesSource > 0) ? minMessagesSource : 0);
+    var delay = Math.round(typeof delaySource === 'number' ? delaySource
+      : ((typeof minMessagesSource === 'number' && minMessagesSource > 0) ? minMessagesSource : 0));
 
     var probabilitySource = sourceField(raw, 'probability');
-    var probability = typeof probabilitySource === 'number' ? Math.max(0, Math.min(100, probabilitySource)) : 100;
+    var probability = typeof probabilitySource === 'number'
+      ? Math.round(Math.max(0, Math.min(100, probabilitySource)))
+      : 100;
 
     var groupWeightSource = sourceField(raw, 'groupWeight');
     var groupWeight = typeof groupWeightSource === 'number' ? groupWeightSource : 100;
@@ -609,9 +630,17 @@
     catch (e) { setStatus(e.message, 'error'); return; }
 
     var settings = readSettings();
+    if (settings === null) return;
     var entries = extracted.entries;
     var outEntries = {};
-    for (var i = 0; i < entries.length; i++) outEntries[String(i)] = convertEntry(entries[i], i, settings);
+    for (var i = 0; i < entries.length; i++) {
+      try {
+        outEntries[String(i)] = convertEntry(entries[i], i, settings);
+      } catch (e) {
+        setStatus('Entry ' + i + ' could not be converted: ' + e.message, 'error');
+        return;
+      }
+    }
 
     var name = $('bookName').value.trim() || extracted.name;
     var description = $('bookDesc').value.trim() || extracted.description;
@@ -663,17 +692,9 @@
     );
   });
 
-  $('downloadOutput').addEventListener('click', async function () {
+  $('downloadOutput').addEventListener('click', function () {
     if (!outputEl.value) return;
     var filename = (($('bookName').value.trim() || 'sillytavern-lorebook').replace(/[^\w\-]+/g, '_')) + '.json';
-    try {
-      var downloads = (window.claude && typeof window.claude.use === 'function') ? await window.claude.use('downloads') : null;
-      if (downloads) {
-        await downloads.save({ filename: filename, data: new Blob([outputEl.value], { type: 'application/json' }) });
-        setStatus('Saved ' + filename + '.', 'ok');
-        return;
-      }
-    } catch (e) { /* fall through */ }
     try {
       var blob = new Blob([outputEl.value], { type: 'application/json' });
       var url = URL.createObjectURL(blob);
