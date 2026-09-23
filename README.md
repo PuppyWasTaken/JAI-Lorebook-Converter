@@ -9,6 +9,6 @@ Bug reports and feature requests can be submitted here: https://forms.gle/kJ8npm
 > FULL DISCLAIMER: Heavily assisted by Claude Sonnet 5 and ChatGPT. I do not take credit.
 
 Thanks: 
-- Aceenvw: Bug Fixes and Resources! 
+- Aceeenvw: Bug Fixes and Resources! 
 
 
